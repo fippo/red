@@ -1,0 +1,159 @@
+<audio id="output" autoplay></audio>
+<label for="fec">Disable Opus FEC</label>
+<input id="disableFEC" type="checkbox" checked>
+<button id="start">start</button>
+<br>
+<label for="control">Redundancy</label>
+<input id="control" type="range" min="0" max="4" step="1" value="1" disabled>
+<span id="redundancy"></span>
+
+<div class="graph-container" id="bitrateGraph">
+    <div>Bitrate (kbps)</div>
+    <canvas id="bitrateCanvas"></canvas>
+</div>
+<div class="graph-container" id="lossGraph">
+    <div>Packet loss in %</div>
+    <canvas id="lossCanvas"></canvas>
+</div>
+<div class="graph-container" id="concealGraph">
+    <div>Concealment factor in %</div>
+    <canvas id="concealCanvas"></canvas>
+</div>
+
+<div>
+Note: start Chrome with --force-fieldtrials=WebRTCFakeNetworkReceiveLossPercent/20/
+in order to force packet loss.
+</div>
+
+<script type="module">
+import {RFC2198Encoder} from './red.js';
+const bitrateGraph = new TimelineGraphView('bitrateGraph', 'bitrateCanvas');
+bitrateGraph.updateEndDate();
+const bitrateSeries = new TimelineDataSeries();
+
+const lossGraph = new TimelineGraphView('lossGraph', 'lossCanvas');
+lossGraph.updateEndDate();
+const lossSeries = new TimelineDataSeries();
+
+const concealGraph = new TimelineGraphView('concealGraph', 'concealCanvas');
+concealGraph.updateEndDate();
+const concealSeries = new TimelineDataSeries();
+
+let lastResult;
+// query getStats every second
+window.setInterval(async () => {
+    if (!pc2) {
+        return;
+    }
+    const receiver = pc2.getReceivers()[0];
+    if (!receiver) {
+        return;
+    }
+    const res = await receiver.getStats();
+    res.forEach(report => {
+        if (report.type !== 'inbound-rtp' || report.isRemote) {
+            return;
+        }
+        const now = report.timestamp;
+
+        if (!(lastResult && lastResult.has(report.id))) {
+            return;
+        }
+        const deltaT = now - lastResult.get(report.id).timestamp;
+
+        // Calculate bitrate.
+        const bitrate = 8 * (report.bytesReceived - lastResult.get(report.id).bytesReceived) / deltaT;
+        bitrateSeries.addPoint(now, bitrate);
+        bitrateGraph.setDataSeries([bitrateSeries]);
+        bitrateGraph.updateEndDate();
+
+        // Calculate loss percentage.
+        const lossRate = Math.floor(100 * (report.packetsLost - lastResult.get(report.id).packetsLost) / (report.packetsReceived - lastResult.get(report.id).packetsReceived));
+        lossSeries.addPoint(now, lossRate);
+        lossGraph.setDataSeries([lossSeries]);
+        lossGraph.updateEndDate();
+
+        // Calculate concealment percentage.
+        const concealRate = Math.floor(100 * (report.concealedSamples - lastResult.get(report.id).concealedSamples ) / (report.totalSamplesReceived - lastResult.get(report.id).totalSamplesReceived));
+        concealSeries.addPoint(now, concealRate);
+        concealGraph.setDataSeries([concealSeries]);
+        concealGraph.updateEndDate();
+    });
+    lastResult = res;
+}, 2000);
+
+const red = new RFC2198Encoder();
+const pc1 = new RTCPeerConnection({
+  encodedInsertableStreams: true,
+});
+const pc2 = new RTCPeerConnection();
+
+pc1.onicecandidate = e => pc2.addIceCandidate(e.candidate);
+pc2.onicecandidate = e => pc1.addIceCandidate(e.candidate);
+pc2.ontrack = e => output.srcObject = e.streams[0];
+
+// We swap the opus and RED payload types such that the other side thinks our Opus is RED and our RED is opus.
+// Then we generate the RED format in our Opus payload which gets interpreted as RED on the other side.
+function swapPayloadTypes(sdp, payloadType1, payloadType2) {
+    return sdp
+        // Swap first payload type with 255
+        .replace('a=rtpmap:' + payloadType1 + ' ', 'a=rtpmap:255 ')
+        .replace('a=rtcp-fb:' + payloadType1 + ' ', 'a=rtcp-fb:255 ')
+        .replace('a=fmtp:' + payloadType1 + ' ' + payloadType2 + '/' + payloadType2, 'a=fmtp:255 255/255')
+        // swawp second payload type with first payload type
+        .replace('a=rtpmap:' + payloadType2 + ' ', 'a=rtpmap:' + payloadType1 + ' ')
+        .replace('a=rtcp-fb:' + payloadType2 + ' ', 'a=rtcp-fb:' + payloadType1 + ' ')
+        .replace('a=fmtp:' + payloadType2 + ' ' + payloadType1 + '/' + payloadType1, 'a=fmtp:' + payloadType1 + ' ' + payloadType2 + '/' + payloadType2)
+        // swap 255 with second payload type
+        .replace('a=rtpmap:255 ', 'a=rtpmap:' + payloadType2 + ' ')
+        .replace('a=rtcp-fb:255 ', 'a=rtcp-fb:' + payloadType2 + ' ')
+        .replace('a=fmtp:255 255/255', 'a=fmtp:' + payloadType2 + ' ' + payloadType1 + '/' + payloadType1);
+}
+
+document.getElementById('start').onclick = async () => {
+    document.getElementById('start').disabled = true;
+    document.getElementById('control').disabled = false;
+    document.getElementById('disableFEC').disabled = true;
+    const stream = await navigator.mediaDevices.getUserMedia({audio: true});
+    const sender = pc1.addTrack(stream.getTracks()[0], stream);
+    const senderStreams = sender.createEncodedStreams();
+    const transformStream = new TransformStream({
+      transform: red.addRedundancy.bind(red),
+    });
+    senderStreams.readable
+      .pipeThrough(transformStream)
+      .pipeTo(senderStreams.writable);
+
+    const offer = await pc1.createOffer();
+    await pc1.setLocalDescription(offer);
+    // This modification is done before signalling.
+    let sdp = swapPayloadTypes(offer.sdp, 111, 63);
+
+    if (document.getElementById('disableFEC').checked) {
+        // Disable inband FEC.
+        sdp = sdp.replace('useinbandfec=1', 'useinbandfec=0');
+    }
+
+    await pc2.setRemoteDescription({type: 'offer', sdp});
+    const answer = await pc2.createAnswer();
+    await pc2.setLocalDescription(answer);
+    sdp = swapPayloadTypes(answer.sdp, 63, 111);
+    if (document.getElementById('disableFEC').checked) {
+        sdp = sdp.replace('useinbandfec=1', 'useinbandfec=0');
+    }
+    await pc1.setRemoteDescription({type: 'answer', sdp});
+
+    const parameters = pc1.getSenders()[0].getParameters();
+    const redParameters = parameters.codecs.find(c => c.mimeType == 'audio/red');
+    red.setOpusPayloadType(redParameters.payloadType);
+}
+
+document.getElementById('control').oninput = () => {
+    const redundancy = parseInt(document.getElementById('control').value, 10);
+    red.setRedundancy(redundancy);
+    document.getElementById('redundancy').innerText = redundancy;
+};
+document.getElementById('redundancy').innerText = document.getElementById('control').value;
+
+</script>
+<script src="https://webrtc.github.io/samples/src/js/third_party/graph.js"></script>

@@ -1,0 +1,26 @@
+{
+  "name": "webrtc-red",
+  "version": "1.0.0",
+  "main": "red.js",
+  "type": "module",
+  "description": "A RFC 2198 encoder for WebRTC encoded insertable streams",
+  "devDependencies": {
+    "c8": "^7.11.0",
+    "chai": "^4.3.4",
+    "chai-as-promised": "^7.1.1",
+    "eslint": "^7.29.0",
+    "eslint-plugin-mocha-only": "0.0.3",
+    "mocha": "^8.4.0",
+    "sinon": "^10.0.0",
+    "sinon-chai": "^3.6.0"
+  },
+  "scripts": {
+    "lint": "eslint *.js test/*.js",
+    "unit-test": "c8 --reporter html mocha",
+    "test": "npm run lint && npm run unit-test"
+  },
+  "keywords": [
+    "webrtc"
+  ],
+  "author": "Philipp Hancke <philipp@hancke.name>"
+}
