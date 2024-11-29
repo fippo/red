@@ -22,5 +22,6 @@
   "keywords": [
     "webrtc"
   ],
-  "author": "Philipp Hancke <philipp@hancke.name>"
+  "author": "Philipp Hancke <philipp@hancke.name>",
+  "license": "MIT"
 }
